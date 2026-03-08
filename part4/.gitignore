@@ -1,0 +1,15 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Terragrunt
+.terragrunt-cache/
+
+# Sensitive variables
+*.tfvars
+*.tfvars.json
+
+# OS
+.DS_Store

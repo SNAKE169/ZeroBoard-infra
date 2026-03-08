@@ -1,0 +1,319 @@
+playbooks:
+
+ - id: pod-restart-loop
+   description: Detect Kubernetes pods repeatedly restarting, typically caused by crash loops, misconfiguration, or dependency failures.
+
+
+   trigger:
+     metric: pod_restart_count
+     condition: "> 3 in 10 minutes"
+     scope: per_pod
+
+
+   classification: incident
+
+
+   actions:
+     - type: describe_pod
+       command: "kubectl describe pod {{ pod_name }} -n {{ namespace }}"
+       output: describe_output
+
+
+     - type: collect_logs
+       command: "kubectl logs {{ pod_name }} -n {{ namespace }} --tail=200"
+       output: log_output
+
+
+     - type: check_recent_deployments
+       source: argocd
+       service: "{{ service }}"
+       output: deployment_info
+
+
+     - type: create_issue
+       title: "Pod restart loop detected: {{ pod_name }}"
+       labels: ["severity:critical", "service:{{ service }}", "type:infra", "auto-triage"]
+       body_template: |
+         ## Incident: Pod Restart Loop
+
+
+        Pod **{{ pod_name }}** in namespace **{{ namespace }}** has restarted **{{ restart_count }} times within 10 minutes**.
+
+
+        ### Service
+        {{ service }}
+
+
+        ### Recent Deployment
+        {{ deployment_info }}
+
+
+        ### Collected Evidence
+        {{ describe_output }}
+
+
+        ### Recent Logs
+        ```
+        {{ log_output }}
+        ```
+
+
+        ### AI Diagnosis
+        {{ ai_root_cause }}
+
+
+        ### Suggested Remediation
+        {{ ai_suggestion }}
+
+
+     - type: notify
+       channel: pagerduty
+       severity: critical
+       message: "Pod restart loop detected for {{ pod_name }} in {{ namespace }}"
+
+
+     - type: remediate
+       strategy: rolling_restart
+       command: "kubectl rollout restart deployment/{{ service }} -n {{ namespace }}"
+       condition: "if last_restart_action > 24h_ago"
+
+
+ - id: latency-spike
+   description: Detect abnormal service latency spikes compared to historical baseline.
+
+
+   trigger:
+     metric: service_p99_latency
+     condition: "> 2x baseline for 5 minutes"
+     scope: per_service
+
+
+   classification: degradation
+
+
+   actions:
+     - type: query_metrics
+       source: cloudwatch
+       metric: p99_latency
+       service: "{{ service }}"
+       window: "15m"
+       output: latency_metrics
+
+
+     - type: check_dependency_latency
+       dependencies:
+         - aurora
+         - redis
+         - opensearch
+       output: dependency_metrics
+
+
+     - type: check_recent_deployments
+       source: argocd
+       service: "{{ service }}"
+       output: deployment_info
+
+
+     - type: create_issue
+       title: "Latency spike detected in {{ service }}"
+       labels: ["severity:medium", "service:{{ service }}", "type:performance", "auto-triage"]
+       body_template: |
+         ## Performance Degradation Detected
+
+
+        Service **{{ service }}** is experiencing elevated latency.
+
+
+        ### Detection
+        p99 latency exceeded **2x baseline** for more than 5 minutes.
+
+
+        ### Current Metrics
+        {{ latency_metrics }}
+
+
+        ### Dependency Health
+        {{ dependency_metrics }}
+
+
+        ### Recent Deployments
+        {{ deployment_info }}
+
+
+        ### AI Analysis
+        {{ ai_root_cause }}
+
+
+        ### Suggested Investigation
+        {{ ai_suggestion }}
+
+
+     - type: add_to_weekly_digest
+       category: performance
+
+
+ - id: certificate-expiration
+   description: Detect TLS certificates approaching expiration.
+
+
+   trigger:
+     metric: tls_certificate_days_remaining
+     condition: "< 7 days"
+     scope: per_domain
+
+
+   classification: incident
+
+
+   actions:
+     - type: check_certificate_details
+       domain: "{{ domain }}"
+       output: cert_details
+
+
+     - type: create_issue
+       title: "TLS certificate expiring soon: {{ domain }}"
+       labels: ["severity:critical", "type:security", "auto-triage"]
+       body_template: |
+         ## Certificate Expiration Warning
+
+
+        TLS certificate for **{{ domain }}** will expire in **{{ days_remaining }} days**.
+
+
+        ### Certificate Details
+        {{ cert_details }}
+
+
+        ### Suggested Action
+        Renew certificate before expiration to avoid service disruption.
+
+
+     - type: remediate
+       strategy: renew_certificate
+       provider: letsencrypt
+       command: "certbot renew --domain {{ domain }}"
+
+
+     - type: notify
+       channel: slack
+       message: "TLS certificate renewal initiated for {{ domain }}"
+
+
+ - id: canary-deployment-rollback
+   description: Automatically rollback failed canary deployments based on elevated error rates.
+
+
+   trigger:
+     metric: canary_error_rate
+     condition: "> 5% within 10 minutes of deployment"
+     scope: deployment
+
+
+   classification: incident
+
+
+   actions:
+     - type: check_deployment_status
+       command: "kubectl rollout status deployment/{{ deployment_name }}"
+       output: rollout_status
+
+
+     - type: collect_error_logs
+       command: "kubectl logs deployment/{{ deployment_name }} --tail=200"
+       output: log_output
+
+
+     - type: remediate
+       strategy: rollback_deployment
+       command: "kubectl rollout undo deployment/{{ deployment_name }}"
+       output: rollback_status
+
+
+     - type: create_issue
+       title: "Automatic rollback triggered for {{ deployment_name }}"
+       labels: ["severity:critical", "type:deployment", "auto-triage"]
+       body_template: |
+         ## Canary Deployment Failure
+
+
+        Deployment **{{ deployment_name }}** triggered an elevated error rate during canary rollout.
+
+
+        ### Detection
+        Error rate exceeded **5% within 10 minutes** of deployment.
+
+
+        ### Rollback Status
+        {{ rollback_status }}
+
+
+        ### Deployment Diagnostics
+        {{ rollout_status }}
+
+
+        ### Recent Logs
+        ```
+        {{ log_output }}
+        ```
+
+
+        ### AI Root Cause Hypothesis
+        {{ ai_root_cause }}
+       
+ - id: database-connection-pool-exhaustion
+   description: Detect exhaustion of Aurora connection pools which can lead to request failures.
+
+
+   trigger:
+     metric: aurora_connection_utilization
+     condition: "> 90% for 5 minutes"
+     scope: database_cluster
+
+
+   classification: incident
+
+
+   actions:
+     - type: query_metrics
+       source: cloudwatch
+       metric: database_connections
+       window: "10m"
+       output: connection_metrics
+
+
+     - type: identify_top_clients
+       source: database_logs
+       output: top_connection_consumers
+
+
+     - type: create_issue
+       title: "Database connection pool nearing exhaustion"
+       labels: ["severity:critical", "type:database", "auto-triage"]
+       body_template: |
+         ## Database Connection Pool Saturation
+
+
+        Aurora cluster **{{ db_cluster }}** is using **{{ connection_utilization }}%** of available connections.
+
+
+        ### Connection Metrics
+        {{ connection_metrics }}
+
+
+        ### Top Connection Consumers
+        {{ top_connection_consumers }}
+
+
+        ### AI Diagnosis
+        {{ ai_root_cause }}
+
+
+        ### Suggested Remediation
+        {{ ai_suggestion }}
+
+
+     - type: remediate
+       strategy: scale_read_replicas
+       condition: "if replica_count < max_allowed"
+       command: "aws rds create-db-instance-read-replica --source-db-instance {{ db_cluster }}"
